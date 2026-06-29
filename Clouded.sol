@@ -1,83 +1,157 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
 
-import "./ReentrancyGuard.sol";
+pragma solidity ^0.8.24;
 
-interface IMarket {
-    function FEE() external view returns (uint256);
-    function minimumBalance() external view returns (uint64);
-    function totalShares() external view returns (uint64);
-    function resolved() external view returns (bool);
-    function hoursToWinnerWithdraw() external view returns (uint256);
-    function deposit(address _trader, uint8 _outcome, uint64 _amount) external payable;
-    function switchToOutcome(address, uint8) external payable;
-    function withdraw(address) external returns (bool, uint64);
-    function delist() external;
-    function appeal(address, string memory) external;
-    function protocolVote(address _trader, uint8 _outcome, uint64 _amount) external;
+import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import { ERC1155 } from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
+import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import { ReentrancyGuardTransient } from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+
+interface IDAO {
+    function founderToken() external view returns (IERC20Metadata);
+    function token() external view returns (IERC20Metadata);
+    function factoryAddr() external view returns (address);
+    function pointProgramAddr() external view returns (address);
+    function isBlacklisted(uint256) external view returns (bool);
+    function getCurrentAccumulatedRevenue(uint256) external view returns (uint256);
+    function claim(uint256) external returns (uint256);
+    function receiveRevenue() external payable returns (uint256);
 }
 
-interface ILend {
-    function depositETH(address pool, address onBehalfOf, uint16 referralCode) external payable;
-    function withdrawETH(address pool, uint256 amount, address to) external;
+interface IClouded {
+    function nextMarketId() external view returns (uint256);
+    function updateURI(string memory) external;
+    function receiveRevenue() external payable;
 }
 
-interface IWhypePool {
-    function balanceOf(address account) external view returns (uint256);
+interface IPoint {
+    function updateCreatorAddr(uint256, address) external;
+    function updateBuyPoint(address, uint256, uint256) external;
+    function updateSellPoint(address, uint256, uint256) external;
+    function activateEpoch(address) external;
 }
 
-interface IERC20 {
-    function approve(address, uint256) external returns (bool);
-}
+interface IToken { function mint(address, uint256) external; }
 
-contract Market is ReentrancyGuard {
-    ILend public hyperLendGateway;
-    IWhypePool public whypePool;
-    IERC20 public whypeToken;
-    address public immutable hyperLendGatewayAddr = 0x49558c794ea2aC8974C9F27886DDfAa951E99171;
-    address public immutable whypeTokenAddr = 0x5555555555555555555555555555555555555555;
-    address public immutable whypePoolAddr = 0x0D745EAA9E70bb8B6e2a0317f85F1d536616bD34;
-    uint256 public immutable TICKET = 10 ** 17;
-    uint256 public immutable FEE = 10 ** 16;
-    uint256 public immutable WINDOW = 72;
-    uint256 public immutable DECIMALS = 18;
-
-    address public factoryAddr;
-    string public market;
-    string public rules;
-    uint256 public startAt;
-    uint256 public endAt;
-    uint8 public outcome;
-    uint8 public totalOutcomes;
-    uint64 public minimumBalance;
-    uint256 public totalFeeCollected;
-    uint256 public totalNetBalance;
-    uint64 public totalShares;
-    uint16 public nextAppealId;
-    mapping(uint8 => string) public outcomes;
-    mapping(uint8 => uint64) public outcomeShares;
-    mapping(uint8 => uint256) public outcomeWeight; // Weight only matters in a particular outcome upon which reward is distributed among winners
-    mapping(uint8 => uint256) public outcomeNetBalance;
-    mapping(address => uint8) public outcomeOf;
-    mapping(address => uint64) public balanceOf;
-    mapping(address => uint256) public balanceOfWithoutFee;
-    mapping(address => uint256) public weightOf;
-    mapping(address => uint256) public rewardOf;
-    mapping(address => uint16) public appealOf;
-    mapping(uint16 => Appeal) public appeals;
-    mapping(uint8 => uint64) public protocolVotes;
-    mapping(address => ProtocolVote) public addressProtocolVote;
-
-    struct Appeal {
-        string reason;
-        address trader;
-        uint64 amountAtStake;
+library UserMarket {
+    struct Set {
+        uint256[] ids;
+        mapping(uint256 => uint256) positions;
     }
 
-    struct ProtocolVote {
-        bool voted;
-        uint8 outcome;
-        uint64 amount;
+    function add(Set storage set, uint256 _marketId) internal {
+        if (set.positions[_marketId] == 0) {
+            set.ids.push(_marketId);
+            set.positions[_marketId] = set.ids.length; // skip index 0 for non existing element
+        }
+    }
+
+    function remove(Set storage set, uint256 _marketId) internal {
+        uint256 _position = set.positions[_marketId];
+        if (_position != 0) {
+            uint256 _index = _position - 1;
+            uint256 _lastIndexId = set.ids[set.ids.length - 1];
+            set.ids[_index] = _lastIndexId;
+            set.positions[_lastIndexId] = _position;
+            set.ids.pop();
+            delete set.positions[_marketId];
+        }
+    }
+
+    function getAll(Set storage set) internal view returns (uint256[] memory) { return set.ids; }
+}
+
+library UserAddr {
+    struct Set {
+        address[] addrs;
+        mapping(address => uint256) positions;
+    }
+
+    function add(Set storage set, address _addr) internal {
+        if (set.positions[_addr] == 0) {
+            set.addrs.push(_addr);
+            set.positions[_addr] = set.addrs.length;
+        }
+    }
+
+    function remove(Set storage set, address _addr) internal {
+        uint256 _position = set.positions[_addr];
+        if (_position != 0) {
+            uint256 _index = _position - 1;
+            address _lastIndexAddr = set.addrs[set.addrs.length - 1];
+            set.addrs[_index] = _lastIndexAddr;
+            set.positions[_lastIndexAddr] = _position;
+            set.addrs.pop();
+            delete set.positions[_addr];
+        }
+    }
+
+    function getLength(Set storage set) internal view returns (uint256) { return set.addrs.length; }
+
+    function getAddrs(Set storage set, uint256 _offset, uint256 _limit) internal view returns (address[] memory addrs) {
+        uint256 _totalAddrs = set.addrs.length;
+        if (_offset >= _totalAddrs) return new address[](0);
+
+        uint256 _end = _offset + _limit > _totalAddrs ? _totalAddrs : _offset + _limit;
+        uint256 _len = _end - _offset;
+        addrs = new address[](_len);
+        for (uint256 i = 0; i < _len; i++) {
+            addrs[i] = set.addrs[_offset + i];
+        }
+    }
+}
+
+contract CloudedFounderToken is ERC20 { constructor(string memory _name, string memory _symbol) ERC20(_name, _symbol) { _mint(msg.sender, 1e8 * 10 ** decimals()); } }
+
+contract CloudedDAO is ReentrancyGuardTransient {
+    using UserMarket for UserMarket.Set;
+    using UserAddr for UserAddr.Set;
+
+    event Stake(address indexed voter, uint256 indexed marketId, uint256 amount);
+    event Unstake(address indexed voter, uint256 indexed marketId, uint256 amount);
+    event FounderStake(uint256 indexed marketId, uint256 amount);
+    event FounderUnstake(uint256 indexed marketId, uint256 amount);
+    event Blacklist(uint256 indexed marketId, bool blacklisted);
+    event Claim(uint256 indexed marketId, uint256 reward);
+    event ReceiveRevenue(uint256 rewardPerTokenAt, uint256 undistributedReward);
+
+    // Founder token is the holder token before initial token launch. But even after token launch, 
+    // the founder token is still useful for the team to claim tokens and update the erc1155 token uri
+    IERC20Metadata public token;
+    IERC20Metadata public founderToken;
+    address public factoryAddr;
+    address public pointProgramAddr;
+
+    uint256 public totalStaked; // the amounts represent the total deposits and votes of the DAO
+    uint256 public rewardPerTokenAt;
+    uint256 public undistributedReward;
+
+    // Markets info
+    mapping(uint256 => uint256) public marketStakeOf;
+    mapping(uint256 => uint256) public rewardPerTokenFrom;
+    mapping(uint256 => uint256) public accumulatedRewardOf;
+    UserMarket.Set private stakedMarkets_;
+    UserMarket.Set private blacklisted_;
+
+    // Stakers info
+    mapping(address => mapping(uint256 => uint256)) public stakeOf;
+    mapping(address => UserMarket.Set) private marketIds_;
+    UserAddr.Set private stakerAddrs_; // used to track founder stakes
+
+    modifier inBound(uint256 _marketId) {
+        uint256 _nextMarketId = IClouded(factoryAddr).nextMarketId();
+        require(_marketId > 0 && _marketId < _nextMarketId, "MarketId out of bound");
+        _;
+    }
+
+    modifier beforeTokenLaunch() {
+        require(address(token) == address(0), "Token is launched");
+        _;
+    }
+
+    modifier isFounderTokenHalfOf() {
+        require(founderToken.balanceOf(msg.sender) > founderToken.totalSupply() / 2, "Not authorized");
+        _;
     }
 
     modifier isFactory() {
@@ -85,448 +159,1048 @@ contract Market is ReentrancyGuard {
         _;
     }
 
-    constructor(
-        address _trader, 
-        string memory _market, 
-        string memory _rules, 
-        uint256 _days, 
-        string[] memory _outcomes, 
-        uint64 _minimumBalance, 
-        uint8 _outcome, 
-        uint64 _amount
-    ) payable {
-        require(bytes(_market).length <= 100, "Out of bound");
-        require(bytes(_rules).length <= 2 ** 13, "Out of bound");
-        require(_days > 7, "Not enough time");
-        hyperLendGateway = ILend(hyperLendGatewayAddr);
-        whypePool = IWhypePool(whypePoolAddr);
-        whypeToken = IERC20(whypePoolAddr);
-        factoryAddr = msg.sender;
-        market = _market;
-        rules = _rules;
-        startAt = block.timestamp;
-        endAt = startAt + _days * 1 days;
-        totalOutcomes = uint8(_outcomes.length);
-        for (uint8 i = 1; i <= totalOutcomes; i++) {
-            outcomes[i] = _outcomes[i - 1];
+    constructor(address _founderTokenAddr) { founderToken = IERC20Metadata(_founderTokenAddr); }
+
+    // Used for getting all founder staked markets before token initial launch
+    function getAllStakedMarket() external view returns (uint256[] memory) { return stakedMarkets_.getAll(); }
+
+    function getAllStakedInfo(uint256[] calldata _marketIds) external view returns (uint256[] memory marketStakes) {
+        uint256 _marketLength = _marketIds.length;
+        marketStakes = new uint256[](_marketLength);
+        for (uint256 i = 0; i < _marketLength; i++) {
+            uint256 _marketId = _marketIds[i];
+            marketStakes[i] = marketStakeOf[_marketId];
         }
-        minimumBalance = _minimumBalance;
-        nextAppealId = 1;
-        _deposit(_trader, _outcome, _amount);
     }
 
-    function contractAddress() public view returns (address) {
-        return address(this);
+    function getStakerMarket(address _addr) external view returns (uint256[] memory) { return marketIds_[_addr].getAll(); }
+
+    function getStakerInfo(address _addr, uint256[] calldata _marketIds) external view returns (uint256[] memory, uint256[] memory) {
+        uint256 _marketLength = _marketIds.length;
+        uint256[] memory _marketBalances = new uint256[](_marketLength);
+        uint256[] memory _balances = new uint256[](_marketLength);
+
+        for (uint256 i = 0; i < _marketLength; i++) {
+            uint256 _marketId = _marketIds[i];
+            _marketBalances[i] = marketStakeOf[_marketId];
+            _balances[i] = stakeOf[_addr][_marketId];
+        }
+
+        return (_marketBalances, _balances);
     }
 
-    function currentTicketPrice() public view returns (uint256) {
-        uint256 _marketDuration = endAt - startAt;
-        uint256 _currentPosition = block.timestamp - startAt;
-        return TICKET * (_marketDuration - _currentPosition) / _marketDuration;
+    function getBlacklistedMarket() external view returns (uint256[] memory) { return blacklisted_.getAll(); }
+
+    function isBlacklisted(uint256 _marketId) external view returns (bool) {
+        uint256 _position = blacklisted_.positions[_marketId];
+        if (_position == 0) return false;
+        return true;
     }
 
-    function prizePool() public view returns (uint256) {
-        if (resolved() && outcome != 0) return whypePool.balanceOf(address(this)) - outcomeNetBalance[outcome];
-        if (resolved() && outcome == 0) return 0;
-        return whypePool.balanceOf(address(this)) - totalNetBalance;
+    function getCurrentAccumulatedRevenue(uint256 _marketId) external view returns (uint256) {
+        uint256 _pending = (rewardPerTokenAt - rewardPerTokenFrom[_marketId]) * marketStakeOf[_marketId];
+        return accumulatedRewardOf[_marketId] + _pending;
     }
 
-    /// The function both takes into consideration of the market before and after resolved
-    function outcomeProbability(uint8 _outcome) public view returns (uint64) {
-        if (outcome != 0) {
-            if (_outcome == outcome) {
-                return 100;
-            } else {
-                return 0;
+    function stake(uint256 _marketId, uint256 _amount) public nonReentrant inBound(_marketId) {
+        uint256 _amountInWei = _amount * 10 ** token.decimals();
+        require(_amountInWei > 0, "Please enter amount");
+        require(token.balanceOf(msg.sender) >= _amountInWei, "Insufficient balance");
+
+        token.transferFrom(msg.sender, address(this), _amountInWei);
+
+        _stake(_marketId, _amount);
+
+        emit Stake(msg.sender, _marketId, _amount);
+    }
+
+    function unstake(uint256 _marketId, uint256 _amount) public nonReentrant inBound(_marketId) {
+        uint256 _amountInWei = _amount * 10 ** token.decimals();
+        require(_amountInWei > 0, "Please enter amount");
+
+        require(marketStakeOf[_marketId] >= _amount, "Market insufficient balance");
+        require(stakeOf[msg.sender][_marketId] >= _amount, "Insufficient balance");
+
+        _unstake(_marketId, _amount);
+
+        token.transfer(msg.sender, _amountInWei);
+
+        emit Unstake(msg.sender, _marketId, _amount);
+    }
+
+    function _stake(uint256 _marketId, uint256 _amount) private {
+        _settle(_marketId);
+
+        totalStaked += _amount;
+        marketStakeOf[_marketId] += _amount;
+        stakeOf[msg.sender][_marketId] += _amount;
+
+        stakedMarkets_.add(_marketId);
+        marketIds_[msg.sender].add(_marketId);
+    }
+
+    function _unstake(uint256 _marketId, uint256 _amount) private {
+        _settle(_marketId);
+
+        totalStaked -= _amount;
+        marketStakeOf[_marketId] -= _amount;
+        stakeOf[msg.sender][_marketId] -= _amount;
+
+        if (marketStakeOf[_marketId] == 0) stakedMarkets_.remove(_marketId);
+        if (stakeOf[msg.sender][_marketId] == 0) marketIds_[msg.sender].remove(_marketId);
+    }
+
+    function founderStake(uint256 _marketId, uint256 _amount) public nonReentrant beforeTokenLaunch inBound(_marketId) {
+        uint256 _amountInWei = _amount * 10 ** founderToken.decimals();
+        require(_amountInWei > 0, "Please enter amount");
+        require(founderToken.balanceOf(msg.sender) >= _amountInWei, "Insufficient balance");
+
+        _stake(_marketId, _amount);
+        stakerAddrs_.add(msg.sender);
+
+        founderToken.transferFrom(msg.sender, address(this), _amountInWei);
+
+        emit FounderStake(_marketId, _amount);
+    }
+
+    function founderUnstake(uint256 _marketId, uint256 _amount) public nonReentrant beforeTokenLaunch inBound(_marketId) {
+        uint256 _amountInWei = _amount * 10 ** founderToken.decimals();
+        require(_amountInWei > 0, "Please enter amount");
+
+        require(marketStakeOf[_marketId] >= _amount, "Market insufficient balance");
+        require(stakeOf[msg.sender][_marketId] >= _amount, "Insufficient balance");
+
+        _unstake(_marketId, _amount);
+        if (marketIds_[msg.sender].ids.length == 0) stakerAddrs_.remove(msg.sender);
+
+        founderToken.transfer(msg.sender, _amountInWei);
+
+        emit FounderUnstake(_marketId, _amount);
+    }
+
+    function updateFactoryAddr(address _factoryAddr) public nonReentrant beforeTokenLaunch isFounderTokenHalfOf {
+        require(factoryAddr == address(0), "Already updated");
+        factoryAddr = _factoryAddr;
+    }
+
+    function updatePointProgramAddr(address _pointProgramAddr) public nonReentrant beforeTokenLaunch isFounderTokenHalfOf {
+        require(pointProgramAddr == address(0), "Already updated");
+        pointProgramAddr = _pointProgramAddr;
+    }
+
+    // This function should be called when after the founder token is updated and unstaked
+    function clearAddr(uint256 _offset, uint256 _limit) public nonReentrant beforeTokenLaunch isFounderTokenHalfOf {
+        uint256 _maxAddrLength = stakerAddrs_.getLength();
+        if (_limit > _maxAddrLength) _limit = _maxAddrLength;
+        address[] memory _addrs = stakerAddrs_.getAddrs(_offset, _limit);
+        for (uint256 i = 0; i < _addrs.length; i++) {
+            uint256[] memory _marketIds = marketIds_[_addrs[i]].getAll();
+            _clearMarket(_addrs[i], _marketIds);
+            stakerAddrs_.remove(_addrs[i]);
+        }
+    }
+
+    function clearAddrMarket(address _addr, uint256 _limit) public nonReentrant beforeTokenLaunch isFounderTokenHalfOf {
+        uint256 _total = marketIds_[_addr].ids.length;
+        if (_limit > _total) _limit = _total;
+        uint256[] memory _subset = new uint256[](_limit);
+        for (uint256 i = 0; i < _limit; i++) { _subset[i] = marketIds_[_addr].ids[i]; }
+        _clearMarket(_addr, _subset);
+        if (_limit == _total) stakerAddrs_.remove(_addr);
+    }
+
+    function _clearMarket(address _addr, uint256[] memory _marketIds) private {
+        for (uint256 j = 0; j < _marketIds.length; j++) {
+            uint256 _marketId = _marketIds[j];
+            _settle(_marketId);
+            uint256 _stakeOf = stakeOf[_addr][_marketId];
+            totalStaked -= _stakeOf;
+            marketStakeOf[_marketId] -= _stakeOf;
+            if (marketStakeOf[_marketId] == 0) stakedMarkets_.remove(_marketId);
+            stakeOf[_addr][_marketId] -= _stakeOf;
+            marketIds_[_addr].remove(_marketId);
+        }
+    }
+
+    // In case one of the team members private key is leaked
+    function emergencyUpdateFounderToken(address _founderTokenAddr) public nonReentrant isFounderTokenHalfOf { founderToken = IERC20Metadata(_founderTokenAddr); }
+
+    function updateURI(string memory _uri) public nonReentrant isFounderTokenHalfOf { IClouded(factoryAddr).updateURI(_uri); }
+
+    // Token will be updated both for the DAO contract and the point program contract
+    // The function is expected only called once and the point contract will revert
+    // Unstake all founder token before calling or they will be locked
+    function launchToken(address _tokenAddr) public nonReentrant isFounderTokenHalfOf {
+        require(totalStaked == 0, "Founder token still staked");
+        token = IERC20Metadata(_tokenAddr);
+        IPoint(pointProgramAddr).activateEpoch(_tokenAddr);
+    }
+
+    // The function can be used conveniently for frontend purpose
+    function blacklist(uint256 _marketId, bool _blacklist) public nonReentrant {
+        require(founderToken.balanceOf(msg.sender) > founderToken.totalSupply() / 3, "Not authorized");
+        if (_blacklist) blacklisted_.add(_marketId);
+        if (!_blacklist) blacklisted_.remove(_marketId);
+        emit Blacklist(_marketId, _blacklist);
+    }
+
+    // MarketId is checked by the factoryAddr
+    function claim(uint256 _marketId) external nonReentrant isFactory returns (uint256 reward) {
+        _settle(_marketId);
+
+        reward = accumulatedRewardOf[_marketId];
+        accumulatedRewardOf[_marketId] = 0;
+
+        IClouded(factoryAddr).receiveRevenue{value: reward}();
+
+        emit Claim(_marketId, reward);
+    }
+
+    // Through undistributedReward, the function will save dust for next distribution
+    function receiveRevenue() external payable nonReentrant isFactory returns (uint256 revenue) {
+        revenue = msg.value;
+        undistributedReward += revenue;
+
+        if (totalStaked > 0) {
+            rewardPerTokenAt += undistributedReward / totalStaked;
+            undistributedReward = undistributedReward % totalStaked;
+        }
+
+        emit ReceiveRevenue(rewardPerTokenAt, undistributedReward);
+    }
+
+    function _settle(uint256 _marketId) private {
+        uint256 _pending = (rewardPerTokenAt - rewardPerTokenFrom[_marketId]) * marketStakeOf[_marketId];
+        accumulatedRewardOf[_marketId] += _pending;
+        rewardPerTokenFrom[_marketId] = rewardPerTokenAt;
+    }
+
+    receive() external payable { revert("Direct transfer not allowed"); }
+
+    fallback() external payable { revert("Direct transfer not allowed"); }
+}
+
+contract MultisigWallet is ReentrancyGuardTransient {
+
+    IERC20Metadata public token;
+    address[] public owners;
+    uint256 public requiredSigns;
+    bool public locked;
+
+    mapping(address => Proposal) public proposalOf;
+    mapping(address => address) public hasSigned;
+    mapping(address => bool) public isOwner;
+
+    enum ActionType { None, Withdraw, AddOwner, RemoveOwner, Locked }
+
+    struct Proposal {
+        ActionType actionType;
+        address to;          // Withdraw: received address / AddOwner: new address / RemoveOwner: to be removed address
+        uint256 amount;      // Withdraw: amount
+        uint256 signCount;
+    }
+
+    modifier onlyOwner() {
+        require(isOwner[msg.sender], "Not owner");
+        _;
+    }
+
+    constructor(address _tokenAddr, address[] memory _owners) {
+        token = IERC20Metadata(_tokenAddr);
+        for (uint256 i = 0; i < _owners.length; i++) {
+            owners.push(_owners[i]);
+            isOwner[_owners[i]] = true;
+        }
+        requiredSigns = _owners.length - 1;
+    }
+
+    function deposit(uint256 _amount) public nonReentrant onlyOwner {
+        uint256 _amountInWei = _amount * 10 ** token.decimals();
+        token.transferFrom(msg.sender, address(this), _amountInWei);
+    }
+
+    function propose(ActionType _type, address _to, uint256 _amount) public nonReentrant onlyOwner {
+        _withdrawProposal(); // the hasSign and signCount must both be cleared before an owner makes a new proposal
+
+        proposalOf[msg.sender] = Proposal({ actionType: _type, to: _to, amount: _amount, signCount: 0 });
+
+        address _previousSign = hasSigned[msg.sender];
+        hasSigned[msg.sender] = msg.sender;
+        _settle(_previousSign, msg.sender);
+    }
+
+    function withdrawProposal() public nonReentrant onlyOwner {
+        _withdrawProposal();
+    }
+
+    function _withdrawProposal() internal {
+        for (uint256 i = 0; i < owners.length; i++) { if (hasSigned[owners[i]] == msg.sender) hasSigned[owners[i]] = address(0); }
+        delete proposalOf[msg.sender];
+    }
+
+    function sign(address _proposerAddr, ActionType _type) public nonReentrant onlyOwner {
+        require(isOwner[_proposerAddr], "Not authorized");
+        require(proposalOf[_proposerAddr].actionType != ActionType.None, "Currently no proposal");
+        require(proposalOf[_proposerAddr].actionType == _type, "ActionType not matched");
+
+        address _previousSign = hasSigned[msg.sender];
+        hasSigned[msg.sender] = _proposerAddr;
+        _settle(_previousSign, _proposerAddr);
+
+        if (proposalOf[_proposerAddr].signCount >= requiredSigns) _execute(_proposerAddr);
+    }
+
+    function _settle(address _previousSign, address _newSign) private {
+        if (_previousSign != address(0)) proposalOf[_previousSign].signCount--;
+        proposalOf[_newSign].signCount++;
+    }
+
+    function _execute(address _addr) private {
+        ActionType _type = proposalOf[_addr].actionType;
+        address _to = proposalOf[_addr].to;
+        uint256 _amount = proposalOf[_addr].amount;
+
+        _clearAllProposal();
+
+        if (_type == ActionType.Withdraw) {
+            require(!locked, "Fund locked");
+            uint256 _amountInWei = _amount * 10 ** token.decimals();
+            require(token.balanceOf(address(this)) >= _amountInWei, "Insufficient balance");
+            token.transfer(_to, _amountInWei);
+        }
+
+        if (_type == ActionType.AddOwner) {
+            require(!isOwner[_to], "Already owner");
+            owners.push(_to);
+            isOwner[_to] = true;
+        }
+
+        if (_type == ActionType.RemoveOwner) {
+            require(isOwner[_to], "Not owner");
+            require(owners.length - 1 >= requiredSigns, "Would break quorum");
+            for (uint256 i = 0; i < owners.length; i++) {
+                if (owners[i] == _to) {
+                    owners[i] = owners[owners.length - 1];
+                    owners.pop();
+                    break;
+                }
             }
+            isOwner[_to] = false;
         }
-        return outcomeShares[_outcome] * 100 / totalShares;
+
+        if (_type == ActionType.Locked) {
+            locked = true;
+        }
     }
 
-    function resolved() public view returns (bool) {
-        if (block.timestamp >= endAt) return true;
-        return false;
+    function _clearAllProposal() private {
+        for (uint256 i = 0; i < owners.length; i++) {
+            hasSigned[owners[i]] = address(0);
+            delete proposalOf[owners[i]];
+        }
+    }
+}
+
+contract Clouded is ERC1155, ReentrancyGuardTransient {
+    using UserMarket for UserMarket.Set;
+    
+    event CreateMarket(
+        address indexed creator, 
+        uint256 indexed marketId, 
+        string name, 
+        string description, 
+        uint256 shares, 
+        uint256 executionPrice, 
+        uint256 marketCurrentPrice
+    );
+
+    event BuyShare(
+        address indexed buyer, 
+        uint256 indexed marketId, 
+        uint256 shares, 
+        uint256 executionPrice, 
+        uint256 slippageBPS, 
+        uint256 msgValue, 
+        uint256 refund, 
+        uint256 marketFeePerShareAt, 
+        uint256 marketCurrentPrice
+    );
+
+    event SellShare(
+        address indexed seller, 
+        uint256 indexed marketId, 
+        uint256 shares, 
+        uint256 slippageBPS
+    );
+
+    event SellerNetProfit(
+        uint256 indexed marketId, 
+        address indexed seller, 
+        uint256 refund, 
+        uint256 feeReward, // traders first rewarded by current marketFee
+        uint256 tradingFee, // then traders pay to marketFee
+        uint256 Payout
+    );
+
+    event FeeStack(
+        uint256 indexed marketId, 
+        uint256 sentinelReward, // extract a little amount from the trading fee
+        uint256 protocolRevenue, // then a fee back to the protocol
+        uint256 marketLastUndistributedFee, // fee collected in last sell
+        uint256 marketFeePerShareAt, 
+        uint256 marketCurrentPrice
+    );
+
+    uint256 constant B = 100; // slope of the bonding curve
+    uint256 constant SENTINEL = 20;
+    uint256 constant DECIMALS = 1e18;
+    address constant DAO = 0xB3690c850d5a4Bc0b7eB1Aa952D3c6854cacad99;
+
+    // Overall market conditions
+    uint256 public totalShares; // total hypes deposited by traders
+    uint256 public nextMarketId;
+    uint256 public sentiment;
+    uint256 public lastUpdatedAt; // last time minimum balance is updated
+
+    // Current market conditions
+    mapping(uint256 => Market) public markets;
+    mapping(uint256 => uint256) public marketFeePerShareAt;
+    mapping(uint256 => uint256) private marketUndistributedFee_;
+    mapping(uint256 => Share[]) private shareStack_;
+
+    // Track active markets for the entire protocol and traders
+    UserMarket.Set private activeMarkets_;
+    mapping(address => UserMarket.Set) private marketIds_;
+
+    // Track epoch active market id and buying shares for updating Sentiment
+    uint256 private nextEpochId_;
+    uint256 private epochActiveMarketShares_;
+    mapping(uint256 => UserMarket.Set) private epochActiveMarkets_;
+
+    // Track traders average buy price
+    mapping(address => mapping(uint256 => BuyPrice)) private buyPriceOf_;
+
+    struct Market {
+        string name;
+        string description;
+        uint256 totalShares;
     }
 
-    function resolvedToDaysHoursMinutes() public view returns (uint256, uint256, uint256) {
-        if (endAt > block.timestamp) {
-            uint256 _remaining = endAt - block.timestamp;
-            return (_remaining / 1 days, (_remaining / 1 hours) % 24, (_remaining / 1 minutes) % 60);
-        }
-        return (0, 0, 0);
+    struct Share {
+        uint256 amount;
+        uint256 feePerShareFrom;
+        uint256 timestamp;
     }
 
-    function hoursToWinnerWithdraw() public view returns (uint256) {
-        if (endAt + WINDOW * 1 hours > block.timestamp) {
-            uint256 _remaining = endAt + WINDOW * 1 hours - block.timestamp;
-            return (_remaining + 1 hours - 1) / 1 hours; // take into consideration of 1 hour left
-        }
+    struct BuyPrice{
+        uint256 amount;
+        uint256 avgPrice;
+    }
+
+    modifier inBound(uint256 _marketId) {
+        require(_marketId > 0 && _marketId < nextMarketId, "MarketId out of bound");
+        _;
+    }
+
+    modifier isBuySell(uint256 _shares, uint256 _slippageBPS) {
+        require(_shares > 0, "Share zero");
+        require(_slippageBPS <= 2000, "Exceed max slippage");
+        _;
+    }
+
+    modifier isDAO() {
+        require(msg.sender == DAO, "Not authorized");
+        _;
+    }
+
+    constructor(string memory _uri) ERC1155(_uri) {
+        nextMarketId = 1;
+        lastUpdatedAt = block.timestamp;
+    }
+
+    function getSentimentUpdateCountdown() external view returns (uint256, uint256, uint256) {
+        uint256 _nextUpdateTimestamp = lastUpdatedAt + 12 hours;
+        if (block.timestamp > _nextUpdateTimestamp) return (0, 0, 0);
+        uint256 _timeLeft = _nextUpdateTimestamp - block.timestamp;
+        uint256 _hours = _timeLeft / 1 hours;
+        uint256 _minutes = _timeLeft / 1 minutes % 60;
+        uint256 _seconds = _timeLeft / 1 seconds % 60;
+        return (_hours, _minutes, _seconds);
+    }
+
+    function getNextSentiment() external view returns (int8) {
+        uint256 _totalMarketLength = epochActiveMarkets_[nextEpochId_].ids.length;
+        uint256 _weightedShares;
+        if (_totalMarketLength != 0) _weightedShares = epochActiveMarketShares_ / _totalMarketLength;
+        if (_weightedShares > sentiment) return 1;
+        if (_weightedShares < sentiment) return -1;
         return 0;
     }
 
-    function getAppeal(uint16 _appealId) public view returns (string memory, address, uint64) {
-        return (appeals[_appealId].reason, appeals[_appealId].trader, appeals[_appealId].amountAtStake);
+    // These functions are used for displaying market info on frontend
+    function getActiveMarketIds() external view returns (uint256[] memory) { return activeMarkets_.getAll(); }
+
+    function getActiveMarketPrice(uint256[] calldata _marketIds) external view returns (uint256[] memory prices) {
+        prices = new uint256[](_marketIds.length);
+        for (uint256 i = 0; i < _marketIds.length; i++) { prices[i] = (10000 + B * markets[_marketIds[i]].totalShares) * DECIMALS / 10000; }
     }
 
-    function getAddressProtocolVote(address _trader) public view returns (bool, uint8, uint64) {
-        return (addressProtocolVote[_trader].voted, addressProtocolVote[_trader].outcome, addressProtocolVote[_trader].amount);
+    function getActiveMarketName(uint256[] calldata _marketIds) external view returns (string[] memory names) {
+        names = new string[](_marketIds.length);
+        for (uint256 i = 0; i < _marketIds.length; i++) { names[i] = markets[_marketIds[i]].name; }
     }
 
-    function deposit(address _trader, uint8 _outcome, uint64 _amount) external payable nonReentrant isFactory {
-        require(outcomeOf[_trader] == 0 || outcomeOf[_trader] == _outcome, "Switch your outcome first");
-        _deposit(_trader, _outcome, _amount);
+    function getActiveMarketDescription(uint256 _marketId) external view returns (string memory) { return markets[_marketId].description; }
+
+    function getMarketUndistributedReward(uint256 _marketId) external view returns (uint256 totalUndistributedReward) {
+        uint256 _protocolRevenue = IDAO(DAO).getCurrentAccumulatedRevenue(_marketId);
+        totalUndistributedReward = _protocolRevenue + marketUndistributedFee_[_marketId];
     }
 
-    /// Traders can only stand with one outcome at a time.
-    /// The protocol encourages earlier entries.
-    function _deposit(address _trader, uint8 _outcome, uint64 _amount) internal {
-        require(resolved() == false, "resolved");
-        require(_outcome > 0 && _outcome <= totalOutcomes, "Out of bound");
-        if (outcomeOf[_trader] == 0) {
-            outcomeOf[_trader] = _outcome;
+    function getMarketFeeStack(uint256 _marketId) external view returns (uint256[] memory feeAmounts, uint256[] memory feePerShares) {
+        Share[] storage shares = shareStack_[_marketId];
+        feeAmounts = new uint256[](shares.length);
+        feePerShares = new uint256[](shares.length);
+        uint256 _fps = marketFeePerShareAt[_marketId];
+        for (uint256 i = 0; i < shares.length; i++) {
+            feeAmounts[i] = shares[i].amount;
+            feePerShares[i] = _fps - shares[i].feePerShareFrom;
         }
-        totalShares += _amount;
-        outcomeShares[_outcome] += _amount;
-        uint64 _previousBalance = balanceOf[_trader];
-        balanceOf[_trader] += _amount;
-        
-        if (weightOf[_trader] == 0) { // only record the initial deposit
-            uint256 _timeWeight = endAt - block.timestamp;
-            weightOf[_trader] = _timeWeight;
-            outcomeWeight[_outcome] += _timeWeight;
-        }
-
-        uint256 _totalFee = FEE;
-        if (_previousBalance == 0) {
-            _totalFee += currentTicketPrice();
-        }
-        uint256 _amountInWei = uint256(_amount) * 10 ** DECIMALS;
-        balanceOfWithoutFee[_trader] += _amountInWei - _totalFee;
-        outcomeNetBalance[_outcome] += _amountInWei - _totalFee;
-        totalNetBalance += _amountInWei - _totalFee;
-        totalFeeCollected += _totalFee;
-        hyperLendGateway.depositETH{value: _amountInWei}(whypeTokenAddr, address(this), 0);
     }
 
-    function switchToOutcome(address _trader, uint8 _outcome) external payable nonReentrant isFactory {
-        require(resolved() == false, "resolved");
-        require(outcomeOf[_trader] != _outcome, "current outcomeOf");
-        uint8 _lastOutcomeOf = outcomeOf[_trader];
-        outcomeShares[_lastOutcomeOf] -= balanceOf[_trader];
-        outcomeWeight[_lastOutcomeOf] -= weightOf[_trader];
+    // These functions are used for displaying trader info on frontend
+    function getTraderMarketIds(address _addr) external view returns (uint256[] memory) { return marketIds_[_addr].getAll(); }
 
-        outcomeNetBalance[_lastOutcomeOf] -= balanceOfWithoutFee[_trader];
-        outcomeNetBalance[_outcome] += balanceOfWithoutFee[_trader];
+    function getTraderMarketInfo(address _addr, uint256[] calldata _marketIds) external view returns (
+        string[] memory marketNames, 
+        uint256[] memory marketPrices, 
+        uint256[] memory avgPrices, 
+        uint256[] memory balances
+    ) {
+        marketNames = new string[](_marketIds.length);
+        marketPrices = new uint256[](_marketIds.length);
+        avgPrices = new uint256[](_marketIds.length);
+        balances = new uint256[](_marketIds.length);
 
-        outcomeOf[_trader] = _outcome;
-        outcomeShares[_outcome] += balanceOf[_trader];
-        
-        uint256 _timeWeight = endAt - block.timestamp;
-        weightOf[_trader] = _timeWeight;
-        outcomeWeight[_outcome] += _timeWeight;
-
-        totalFeeCollected += msg.value;
-        hyperLendGateway.depositETH{value: msg.value}(whypeTokenAddr, address(this), 0);
+        for (uint256 i = 0; i < _marketIds.length; i++) {
+            Market storage market = markets[_marketIds[i]];
+            marketNames[i] = market.name;
+            marketPrices[i] = (10000 + B * market.totalShares) * DECIMALS / 10000;
+            avgPrices[i] = buyPriceOf_[_addr][_marketIds[i]].avgPrice;
+            balances[i] = balanceOf(_addr, _marketIds[i]);
+        }
     }
 
-    function withdraw(address _trader) external nonReentrant isFactory returns (bool deactivating, uint64 balance) {
-        require(balanceOf[_trader] != 0, "No balance");
-        // Here, we shouldn't change other values besides balanceOf in case of resolved
-        // If protocol votes outcome 0 for uncertainty of outcome
-        // outcomeProbability() will still leave the shares as they are
-        uint64 _shares = balanceOf[_trader];
-        balanceOf[_trader] = 0;
-        uint256 _balanceInWei = balanceOfWithoutFee[_trader];
-        balanceOfWithoutFee[_trader] = 0;
-        uint8 _outcome = outcomeOf[_trader];
-        if (resolved()) {
-            require(hoursToWinnerWithdraw() == 0, "Window");
-            if (nextAppealId == 1) {
-                if (outcome == 0) {
-                    uint64 _outcomeShares = outcomeShares[_outcome];
-                    for (uint8 i = 1; i <= totalOutcomes; i++) {
-                        if (outcomeShares[i] > _outcomeShares) {
-                            revert notOutcome();
-                        }
-                    }
-                    outcome = _outcome;
-                }
-            } else {
-                uint64 _highestShares;
-                uint8 _highestOutcome;
-                uint8 _count;
-                for (uint8 i = 1; i <= totalOutcomes; i++) {
-                    if (outcomeShares[i] == _highestShares) {
-                        _count++;
-                    }
-                    if (outcomeShares[i] > _highestShares) {
-                        _highestShares = outcomeShares[i];
-                        _highestOutcome = i;
-                        _count = 1;
-                    }
-                }
-                if (_count == 1) {
-                    if (protocolVotes[0] > _highestShares) {
-                        outcome = 0;
-                    } else {
-                        outcome = _highestOutcome;
-                    }
-                }
-                if (_count > 1) {
-                    uint8 _protocolCount;
-                    for (uint8 i = 1; i <= totalOutcomes; i++) {
-                        uint64 _votes = protocolVotes[i] + outcomeShares[i];
-                        if (_votes == _highestShares) {
-                            _protocolCount++;
-                        }
-                        if (_votes > _highestShares) {
-                            _highestShares = _votes;
-                            _highestOutcome = i;
-                            _protocolCount = 1;
-                        }
-                    }
-                    if (_protocolCount == 1) {
-                        outcome = _highestOutcome;
-                    } else {
-                        outcome = 0;
-                    }
-                }
-            }
-            if (outcomeOf[_trader] == outcome) {
-                uint256 _prize = prizePool();
-                outcomeNetBalance[_outcome] -= _balanceInWei;
-                uint256 _reward = weightOf[_trader] * _prize / outcomeWeight[outcome];
-                outcomeWeight[outcome] -= weightOf[_trader];
-                rewardOf[_trader] = _reward;
-                whypeToken.approve(hyperLendGatewayAddr, _reward + _balanceInWei);
-                hyperLendGateway.withdrawETH(whypeTokenAddr, _reward + _balanceInWei, _trader);
-                return (true, _shares);
-            }
-            if (outcome == 0) {
-                _balanceInWei = uint256(_shares) * 10 ** DECIMALS;
-                whypeToken.approve(hyperLendGatewayAddr, _balanceInWei);
-                hyperLendGateway.withdrawETH(whypeTokenAddr, _balanceInWei, _trader);
-                return (true, _shares);
-            }
-            return (true, _shares);
-        }
+    function createMarket(string memory _name, string memory _description, uint256 _shares) public payable nonReentrant {
+        // Check parameters
+        require(bytes(_name).length >= 10 && bytes(_name).length <= 100, "Name out of bound");
+        require(bytes(_description).length <= 1000, "Description out of bound");
 
+        uint256 _currentMarketId = nextMarketId;
+        markets[_currentMarketId].name = _name;
+        markets[_currentMarketId].description = _description;
+
+        uint256 _priceInWei = _getPrice(_currentMarketId, true, _shares); // Price read directly from contract, not frontend, so slippage is not considered
+        _buyShare(_currentMarketId, _shares, _priceInWei, _priceInWei, 0);
+
+        uint256 _currentPrice = (10000 + B * markets[_currentMarketId].totalShares) * DECIMALS / 10000;
+        nextMarketId++;
+
+        emit CreateMarket(
+            msg.sender, 
+            _currentMarketId, 
+            _name, 
+            _description, 
+            _shares, 
+            _priceInWei, 
+            _currentPrice
+        );
+    }
+
+    function buyShare(uint256 _marketId, uint256 _shares, uint256 _frontendPriceInWei, uint256 _slippageBPS) public payable nonReentrant inBound(_marketId) {
+        uint256 _executionPriceInWei = _getPrice(_marketId, true, _shares);
+        uint256 _refundInWei = _buyShare(_marketId, _shares, _executionPriceInWei, _frontendPriceInWei, _slippageBPS);
+        uint256 _marketFeePerShareAt = marketFeePerShareAt[_marketId];
+        uint256 _currentPrice = (10000 + B * markets[_marketId].totalShares) * DECIMALS / 10000;
+
+        emit BuyShare(
+            msg.sender, 
+            _marketId, 
+            _shares, 
+            _executionPriceInWei, 
+            _slippageBPS, 
+            msg.value, 
+            _refundInWei, 
+            _marketFeePerShareAt, 
+            _currentPrice
+        );
+    }
+
+    // A private function is separated for different requirements when creating a market or simply buying shares.
+    // NextMarketId, _frontendPriceInWei, _slippageBPS are treated differently depending on whichever the caller functions.
+    // _frontendPriceInWei is the price read in frontend.
+    function _buyShare(
+        uint256 _marketId, 
+        uint256 _shares, 
+        uint256 _executionPriceInWei, 
+        uint256 _frontendPriceInWei, 
+        uint256 _slippageBPS
+    ) private isBuySell(_shares, _slippageBPS) returns (uint256 refundInWei) {
+        require(markets[_marketId].totalShares + _shares >= sentiment, "Market currently below minimum balance");
+
+        // In the case of createMarket(), _frontendPriceInWei will always be equal to _executionPriceInWei
+        // Since the market is not tradable if it's not created first, thus will not experience price change at all
+        uint256 _maxPrice = _frontendPriceInWei * (10000 + _slippageBPS) / 10000;
+        require(msg.value >= _executionPriceInWei && msg.value <= _maxPrice, "Exceed slippage");
+
+        _collectProtocolRevenue(_marketId);
+
+        // Update market current conditions
+        totalShares += _shares;
+        markets[_marketId].totalShares += _shares;
+
+        _calculateMinimumBalance(_marketId, _shares);
+
+        _pushShare(_marketId, _shares);
+
+        // Update protocol active markets and Trader active markets
+        activeMarkets_.add(_marketId);
+        marketIds_[msg.sender].add(_marketId);
+
+        _calculateTraderAverageBuyPrice(msg.sender, _marketId, true, _shares, _executionPriceInWei);
+
+        // Record points earned by users
+        // If _marketId == nextMarketId, the function is called from createMarket() and brfore nextMarketId is Incremented
+        address _pointProgramAddr = IDAO(DAO).pointProgramAddr();
+        if (_marketId == nextMarketId) IPoint(_pointProgramAddr).updateCreatorAddr(_marketId, msg.sender);
+        IPoint(_pointProgramAddr).updateBuyPoint(msg.sender, _marketId, _shares);
+
+        _mint(msg.sender, _marketId, _shares, "");
+
+        refundInWei = msg.value - _executionPriceInWei;
+        if (refundInWei > 0) {
+            (bool _success, ) = msg.sender.call{value: refundInWei}("");
+            require(_success, "Refund failed");
+        }
+    }
+
+    // Unlike trading fee, protocol revenue generate continuously in DAO contract
+    // Revenue generated before new buys should belong to former shares
+    // marketUndistributedFee_ will be recorded if there is still revenue left to be claimed
+    // and before _marketTotalShares is updated and _pushShare is called
+    function _collectProtocolRevenue(uint256 _marketId) private {
+        uint256 _marketTotalShares = markets[_marketId].totalShares;
+        uint256 _protocolRevenue = IDAO(DAO).claim(_marketId);
+        if (_marketTotalShares == 0) marketUndistributedFee_[_marketId] += _protocolRevenue;
+        if (_marketTotalShares > 0) {
+            _protocolRevenue += marketUndistributedFee_[_marketId];
+            marketFeePerShareAt[_marketId] += _protocolRevenue / _marketTotalShares;
+            marketUndistributedFee_[_marketId] = _protocolRevenue % _marketTotalShares;
+        }
+    }
+
+    function _calculateMinimumBalance(uint256 _marketId, uint256 _shares) private {
+        _updateSentiment();
+        epochActiveMarkets_[nextEpochId_].add(_marketId);
+        epochActiveMarketShares_ += _shares;
+    }
+
+    function _pushShare(uint256 _marketId, uint256 _shares) private {
+        Share[] storage stack = shareStack_[_marketId];
+        uint256 _fps = marketFeePerShareAt[_marketId];
+
+        stack.push(Share({
+            amount: _shares, 
+            feePerShareFrom: _fps, 
+            timestamp: block.timestamp
+        }));
+    }
+
+    // Anyone can always call this function to update Sentinel, 
+    // especially if the price gets too high to update it through buyShare()
+    function updateSentiment() public { _updateSentiment(); }
+
+    function _updateSentiment() private {
+        uint256 _timePassed = block.timestamp - lastUpdatedAt;
+        uint256 _totalMarketLength = epochActiveMarkets_[nextEpochId_].ids.length;
+        if (_timePassed > 12 hours) {
+            uint256 _weightedShares;
+            if (_totalMarketLength != 0) _weightedShares = epochActiveMarketShares_ / _totalMarketLength;
+            if (_weightedShares > sentiment) sentiment++;
+            if (_weightedShares < sentiment) sentiment--;
+            nextEpochId_++;
+            epochActiveMarketShares_ = 0;
+            lastUpdatedAt = block.timestamp;
+        }
+    }
+
+    function sellShare(
+        uint256 _marketId, 
+        uint256 _shares, 
+        uint256 _frontendPriceInWei, 
+        uint256 _slippageBPS
+    ) public nonReentrant inBound(_marketId) isBuySell(_shares, _slippageBPS) {
+        require(_shares <= balanceOf(msg.sender, _marketId), "Insufficient shares");
+
+        uint256 _refund = _getPrice(_marketId, false, _shares);
+        uint256 _minPrice = _frontendPriceInWei * (10000 - _slippageBPS) / 10000;
+        require(_refund >= _minPrice, "Exceed slippage");
+
+        (uint256 _netProfit, uint256 _tradingFee, uint256 _points) = _calculateProfit(_marketId, _shares, _refund);
+
+        _updateMarket(_marketId, _shares, _points);
+
+        _calculateRewardFee(_marketId, _tradingFee);
+
+        // Send refund to seller
+        (bool _success, ) = msg.sender.call{value: _netProfit}("");
+        require(_success, "Refund failed");
+
+        emit SellShare(
+            msg.sender, 
+            _marketId, 
+            _shares, 
+            _slippageBPS
+        );
+    }
+
+    function _getPrice(uint256 _marketId, bool _buy, uint256 _shares) private view returns (uint256 priceInWei) {
+        uint256 _term1 = 1 * _shares * DECIMALS; // The initial price is always 1 $HYPE
+        uint256 _term2 = _getPriceAppreciation(_marketId, _buy, _shares);
+        priceInWei =  _term1 + _term2;
+    }
+
+    function _getPriceAppreciation(uint256 _marketId, bool _buy, uint256 _shares) private view returns (uint256) {
+        uint256 _sharesAfter = _buy ? markets[_marketId].totalShares + _shares : markets[_marketId].totalShares - _shares;
+        uint256 _sharesAfterSquared  = _sharesAfter * _sharesAfter;
+        uint256 _sharesBeforeSquared = markets[_marketId].totalShares * markets[_marketId].totalShares;
+        return _buy ? B * (_sharesAfterSquared - _sharesBeforeSquared) * DECIMALS / 2 / 10000 : B * (_sharesBeforeSquared - _sharesAfterSquared) * DECIMALS / 2 / 10000;
+    }
+
+    function _calculateProfit(uint256 _marketId, uint256 _shares, uint256 _refund) private returns (uint256, uint256, uint256) {
+        // Calculate trader reward. This constitutes sell price and past trading fee
+        (uint256 _feeReward, uint256 _points) = _popLots(_marketId, _shares);
+
+        // Fees that trader needs to pay
+        uint256 _term2 = _getPriceAppreciation(_marketId, false, _shares);
+        uint256 _tradingFee = _term2 / 2;
+
+        // Trader net profit
+        uint256 _netProfit = _refund + _feeReward - _tradingFee;
+
+        emit SellerNetProfit(
+            _marketId, 
+            msg.sender, 
+            _refund, 
+            _feeReward, 
+            _tradingFee, 
+            _netProfit
+        );
+
+        return (_netProfit, _tradingFee, _points);
+    }
+
+    function _popLots(uint256 _marketId, uint256 _shares) private returns (uint256 feeReward, uint256 points) {
+        Share[] storage stack = shareStack_[_marketId];
+        uint256 _remaining = _shares;
+        uint256 _fps = marketFeePerShareAt[_marketId];
+
+        while (_remaining > 0) {
+            Share storage top = stack[stack.length - 1];
+            uint256 _stackRemaining = _remaining < top.amount ? _remaining : top.amount;
+
+            feeReward += _stackRemaining * (_fps - top.feePerShareFrom);
+            
+            uint256 _days = (block.timestamp - top.timestamp) / 1 days;
+            points += _days * _stackRemaining * 100;
+
+            top.amount -= _stackRemaining;
+            if (top.amount == 0) stack.pop();
+            _remaining -= _stackRemaining;
+        }
+    }
+
+    function _updateMarket(uint256 _marketId, uint256 _shares, uint256 _points) private {
+        // Update market shares and price before sending fund
         totalShares -= _shares;
-        outcomeOf[_trader] = 0;
-        outcomeShares[_outcome] -= _shares;
+        markets[_marketId].totalShares -= _shares;
+        if (markets[_marketId].totalShares == 0) activeMarkets_.remove(_marketId);
 
-        uint256 _weight = weightOf[_trader];
-        weightOf[_trader] = 0;
-        outcomeWeight[_outcome] -= _weight;
-
-        outcomeNetBalance[_outcome] -= _balanceInWei;
-        totalNetBalance -= _balanceInWei;
-        _balanceInWei = _balanceInWei - FEE;
-        totalFeeCollected += FEE;
-        whypeToken.approve(hyperLendGatewayAddr, _balanceInWei);
-        hyperLendGateway.withdrawETH(whypeTokenAddr, _balanceInWei, _trader);
-        return (false, _shares);
+        // Update trader info
+        // _burn, then check balanceOf
+        // try catch _pointProgramAddr in case of fund locked
+        _calculateTraderAverageBuyPrice(msg.sender, _marketId, false, _shares, 0);
+        _burn(msg.sender, _marketId, _shares); // trader balance changes after this
+        if (balanceOf(msg.sender, _marketId) == 0) marketIds_[msg.sender].remove(_marketId);
+        address _pointProgramAddr = IDAO(DAO).pointProgramAddr();
+        try IPoint(_pointProgramAddr).updateSellPoint(msg.sender, _marketId, _points) {} catch {}
     }
 
-    function delist() external isFactory {
-        outcome = totalOutcomes + 1;
-    }
-
-    function appeal(address _trader, string memory _reason) external isFactory {
-        require(resolved() && hoursToWinnerWithdraw() != 0, "Expired");
-        require(bytes(_reason).length >= 100 && bytes(_reason).length <= 1000, "Out of bound");
-        uint8 _traderOutcome = outcomeOf[_trader];
-        uint64 _outcomeShares = outcomeShares[_traderOutcome];
-        uint8 _count;
-        for (uint8 i = 1; i <= totalOutcomes; i++) {
-            if (_outcomeShares <= outcomeShares[i]) _count++;
+    function _calculateTraderAverageBuyPrice(address _addr, uint256 _marketId, bool _isBuy, uint256 _shares, uint256 _price) private {
+        BuyPrice storage buyPriceInfo = buyPriceOf_[_addr][_marketId];
+        if (_isBuy) {
+            buyPriceInfo.avgPrice = (buyPriceInfo.amount * buyPriceInfo.avgPrice + _price) / (buyPriceInfo.amount + _shares);
+            buyPriceInfo.amount += _shares;
         }
-        if (_count == 1) revert winningOutcome();
-
-        uint16 _currentAppealId;
-        if (appealOf[_trader] == 0) {
-            _currentAppealId = nextAppealId;
-            nextAppealId++;
-        } else {
-            _currentAppealId = appealOf[_trader];
+        if (!_isBuy) {
+            if (buyPriceInfo.amount < _shares) {
+                _shares = buyPriceInfo.amount;
+                buyPriceInfo.avgPrice = 0;
+            }
+            buyPriceInfo.amount -= _shares;
         }
-        appealOf[_trader] = _currentAppealId;
-        appeals[_currentAppealId].reason = _reason;
-        appeals[_currentAppealId].trader = _trader;
-        appeals[_currentAppealId].amountAtStake = balanceOf[_trader];
     }
 
-    function protocolVote(address _trader, uint8 _outcome, uint64 _amount) external nonReentrant isFactory {
-        require(resolved() && hoursToWinnerWithdraw() != 0, "Unavailable");
-        require(_outcome >= 0 && _outcome <= totalOutcomes, "Out of bound");
-        require(nextAppealId != 1, "No dispute");
-        ProtocolVote memory _protocolVote = addressProtocolVote[_trader];
-        if (_protocolVote.voted) {
-            protocolVotes[_protocolVote.outcome] -= _protocolVote.amount;
+    function _calculateRewardFee(uint256 _marketId, uint256 _tradingFee) private {
+        // Claim protocol revenue first, then send sentinel revenue to the protocol
+        // The revenue sentinel collected this time is not counted
+        // But will be saved for next trade if there are tokens staking for the market
+        // Check _factoryAddr to make sure the function will not be reverted and traders fund locked
+        // When _marketTotalShares is 0, Sentinel will get all the remaining _tradingFee
+        uint256 _marketTotalShares = markets[_marketId].totalShares;
+        uint256 _calculatingSentinelReward = _tradingFee * SENTINEL / (_marketTotalShares + SENTINEL);
+        uint256 _maxSentinelReward = _tradingFee / 5;
+        if (_marketTotalShares != 0 && _calculatingSentinelReward > _maxSentinelReward) _calculatingSentinelReward = _maxSentinelReward;
+        uint256 _sentinelReward;
+        uint256 _protocolRevenue;
+        try IDAO(DAO).claim(_marketId) returns (uint256 _claimedRevenue) { _protocolRevenue = _claimedRevenue; } catch {}
+        try IDAO(DAO).receiveRevenue{value: _calculatingSentinelReward}() returns (uint256 _revenue) { _sentinelReward = _revenue; } catch {}
+
+        // updateMarketFee
+        // Update accumulated market fee after deminishing market totalShares and interacting with DAO
+        // When there is no share in the market, the market will still generate feeReward in DAO if tokens staked
+        // marketUndistributedFee_ takes into account when _marketTotalShares is 0 after claiming _protocolRevenue
+        // These _protocolRevenue will go into marketUndistributedFee_ and reserve for next trade
+        uint256 _marketLastUndistributedFee = marketUndistributedFee_[_marketId];
+        if (_marketTotalShares == 0) {
+            uint256 _totalUndistributedFee = _tradingFee - _sentinelReward + _protocolRevenue; // _tradingFee - _sentinelReward takes into account when receiveRevenue failed
+            marketUndistributedFee_[_marketId] += _totalUndistributedFee; // here should be += instead of =
         }
-        protocolVotes[_outcome] += _amount;
-        addressProtocolVote[_trader].voted = true;
-        addressProtocolVote[_trader].outcome = _outcome;
-        addressProtocolVote[_trader].amount = _amount;
+        if (_marketTotalShares > 0) {
+            marketFeePerShareAt[_marketId] += (_tradingFee - _sentinelReward + _protocolRevenue + _marketLastUndistributedFee) / _marketTotalShares;
+            marketUndistributedFee_[_marketId] = (_tradingFee - _sentinelReward + _protocolRevenue + _marketLastUndistributedFee) % _marketTotalShares;
+        }
+
+        uint256 _currentPrice = (10000 + B * _marketTotalShares) * DECIMALS / 10000;
+
+        emit FeeStack(_marketId, _sentinelReward, _protocolRevenue, _marketLastUndistributedFee, marketFeePerShareAt[_marketId], _currentPrice);
     }
 
-    error notOutcome();
-    error winningOutcome();
+    function updateURI(string memory _newURI) external nonReentrant isDAO { _setURI(_newURI); }
+
+    function receiveRevenue() external payable isDAO {}
+
+    receive() external payable { revert("Direct transfer not allowed"); }
+
+    fallback() external payable { revert("Direct transfer not allowed"); }
 }
 
-contract Clouded is ReentrancyGuard {
-    uint64 public totalBalance;
-    address[] public activeMarkets;
-    uint64 public nextMarketId;
-    mapping(uint64 => address) public marketAddr;
-    mapping(address => bool) public isActive;
-    mapping(address => uint64) public votesToDelist;
-    mapping(address => address[]) public hasBalanceOf;
-    mapping(address => uint64) public balanceOf;
-    mapping(address => mapping(address => uint64)) public addressHasVotedToDelist;
-    uint256 public immutable DECIMALS = 18;
+contract CloudedPoint is ReentrancyGuardTransient {
+    using UserAddr for UserAddr.Set;
 
-    modifier isActiveMarket(address _marketAddr) {
-        require(isActive[_marketAddr], "Not active");
+    event UpdatePoints(
+        uint256 indexed epoch, 
+        uint256 indexed marketId, 
+        bool indexed isBuy, 
+        address traderAddr, 
+        address creatorAddr, 
+        uint256 points
+    );
+
+    event ClaimToken(
+        uint256 indexed epoch, 
+        address indexed user, 
+        uint256 traderReward, 
+        uint256 creatorReward, 
+        uint256 totalReward
+    );
+
+    address constant DAO = 0xB3690c850d5a4Bc0b7eB1Aa952D3c6854cacad99;
+    address constant FACTORY = 0x41D609212882f10AdCA647AFA53BA1e818e53a58;
+    uint256 constant EPOCH_DURATION = 30 days;
+
+    // Community amount is represented in half, split between traders and market creators
+    // The distribution between traders and creators is 70:30
+    uint256 constant COMMUNITY_TRADER_INITIAL_LAUNCH = 14_000_000;
+    uint256 constant COMMUNITY_CREATOR_INITIAL_LAUNCH = 6_000_000;
+    uint256 constant COMMUNITY_TRADER_LINEAR_UNLOCK = 1_400_000;
+    uint256 constant COMMUNITY_CREATOR_LINEAR_UNLOCK = 600_000;
+
+    address public tokenAddr;
+    uint256 public nextEpoch;
+    mapping(uint256 => uint256) public epochTimestamp;
+    mapping(uint256 => uint256) public epochTotalTraderPoints;
+    mapping(uint256 => uint256) public epochTotalCreatorPoints;
+    mapping(uint256 => address) public marketCreator;
+    mapping(uint256 => mapping(address => uint256)) public epochTraderPoints;
+    mapping(uint256 => mapping(address => uint256)) public epochCreatorPoints;
+    mapping(uint256 => mapping(address => bool)) public epochUserClaimed;
+    mapping(uint256 => UserAddr.Set) private epochTraders_;
+    mapping(uint256 => UserAddr.Set) private epochCreators_;
+
+    modifier isFactory() {
+        require(msg.sender == FACTORY, "Not authorized");
         _;
     }
 
     constructor() {}
 
-    function getCurrentMinimumBalance() public view returns (uint64) {
-        if (totalBalance / 100 > 100) return totalBalance / 100;
-        return 100;
+    function getTraderPastEpoch(address _addr) external view returns (
+        uint256[] memory totalTraderPoints, 
+        uint256[] memory traderPoints, 
+        uint256[] memory totalCreatorPoints, 
+        uint256[] memory creatorPoints
+    ) {
+        totalTraderPoints = new uint256[](nextEpoch);
+        traderPoints = new uint256[](nextEpoch);
+        totalCreatorPoints = new uint256[](nextEpoch);
+        creatorPoints = new uint256[](nextEpoch);
+        for (uint256 i = 0; i < nextEpoch; i++) {
+            totalTraderPoints[i] = epochTotalTraderPoints[i];
+            traderPoints[i] = epochTraderPoints[i][_addr];
+            totalCreatorPoints[i] = epochTotalCreatorPoints[i];
+            creatorPoints[i] = epochCreatorPoints[i][_addr];
+        }
     }
 
-    function getMarketMinimumBalance(address _marketAddr) public view returns (uint64) {
-        IMarket _market = IMarket(_marketAddr);
-        return _market.minimumBalance();
+    function getEpochTraderCount(uint256 _epoch) external view returns (uint256) { return epochTraders_[_epoch].getLength(); }
+
+    function getEpochCreatorCount(uint256 _epoch) external view returns (uint256) { return epochCreators_[_epoch].getLength(); }
+
+    function getEpochTraderLeaderboard(uint256 _epoch, uint256 _offset, uint256 _limit) external view returns (address[] memory addrs, uint256[] memory points) {
+        addrs = epochTraders_[_epoch].getAddrs(_offset, _limit);
+        points = new uint256[](addrs.length);
+        for (uint256 i = 0; i < addrs.length; i++) {
+            points[i] = epochTraderPoints[_epoch][addrs[i]];
+        }
     }
 
-    function createMarket(
-        string memory _name, 
-        string memory _rules, 
-        uint256 _days, 
-        string[] memory _outcomes, 
-        uint8 _outcome, 
-        uint64 _amount
-    ) public payable nonReentrant {
-        uint256 _amountInWei = uint256(_amount) * 10 ** DECIMALS;
-        require(msg.value == _amountInWei, "Must equivalent");
-        Market _market = new Market{value: _amountInWei}(
-            msg.sender, 
-            _name, 
-            _rules, 
-            _days, 
-            _outcomes, 
-            getCurrentMinimumBalance(), 
-            _outcome, 
-            _amount
+    function getEpochCreatorLeaderboard(uint256 _epoch, uint256 _offset, uint256 _limit) external view returns (address[] memory addrs, uint256[] memory points) {
+        addrs = epochCreators_[_epoch].getAddrs(_offset, _limit);
+        points = new uint256[](addrs.length);
+        for (uint256 i = 0; i < addrs.length; i++) {
+            points[i] = epochCreatorPoints[_epoch][addrs[i]];
+        }
+    }
+
+    function remainingTimeToNextEpoch() external view returns (uint256, uint256, uint256) {
+        require(nextEpoch > 0, "Token not launched");
+        if (block.timestamp >= epochTimestamp[nextEpoch] + EPOCH_DURATION) return (0, 0, 0);
+        uint256 _remainingTime = epochTimestamp[nextEpoch] + EPOCH_DURATION - block.timestamp;
+        uint256 _remainingDay = _remainingTime / 1 days;
+        uint256 _remainingHour = _remainingTime / 1 hours % 24;
+        uint256 _remainingMinute = _remainingTime / 1 minutes % 60;
+        return (_remainingDay, _remainingHour, _remainingMinute);
+    }
+
+    function updateCreatorAddr(uint256 _marketId, address _creatorAddr) external nonReentrant isFactory { marketCreator[_marketId] = _creatorAddr; }
+
+    // nextEpoch can be 0, which represents the epoch before initial token launch
+    function updateBuyPoint(
+        address _traderAddr, 
+        uint256 _marketId, 
+        uint256 _shares
+    ) external nonReentrant isFactory {
+        _updateEpoch();
+
+        uint256 _points = _shares * 100;
+        epochTotalTraderPoints[nextEpoch] += _points;
+        epochTraderPoints[nextEpoch][_traderAddr] += _points;
+
+        address _creatorAddr = marketCreator[_marketId];
+        epochTotalCreatorPoints[nextEpoch] += _points;
+        epochCreatorPoints[nextEpoch][_creatorAddr] += _points;
+
+        epochTraders_[nextEpoch].add(_traderAddr);
+        epochCreators_[nextEpoch].add(_creatorAddr);
+
+        emit UpdatePoints(
+            nextEpoch, 
+            _marketId, 
+            true, 
+            _traderAddr, 
+            _creatorAddr, 
+            _points
         );
-        nextMarketId++;
-        marketAddr[nextMarketId] = address(_market);
-        activeMarkets.push(address(_market));
-        isActive[address(_market)] = true;
-        totalBalance += _amount;
-        hasBalanceOf[msg.sender].push(address(_market));
-        balanceOf[msg.sender] += _amount;
     }
 
-    function deposit(address _marketAddr, uint8 _outcome, uint64 _amount) public payable nonReentrant isActiveMarket(_marketAddr) {
-        uint256 _amountInWei = uint256(_amount) * 10 ** DECIMALS;
-        require(msg.value == _amountInWei, "Must equivalent");
-        IMarket _market = IMarket(_marketAddr);
-        _market.deposit{value: _amountInWei}(msg.sender, _outcome, _amount);
-        (bool _has, ) = _getTraderMarketIndexSafe(msg.sender, _marketAddr);
-        if (!_has) {
-            hasBalanceOf[msg.sender].push(_marketAddr);
-        }
-        totalBalance += _amount;
-        balanceOf[msg.sender] += _amount;
+    function updateSellPoint(
+        address _traderAddr, 
+        uint256 _marketId, 
+        uint256 _points
+    ) external nonReentrant isFactory {
+        _updateEpoch();
+
+        epochTotalTraderPoints[nextEpoch] += _points;
+        epochTraderPoints[nextEpoch][_traderAddr] += _points;
+
+        address _creatorAddr = marketCreator[_marketId];
+
+        epochTraders_[nextEpoch].add(_traderAddr);
+
+        emit UpdatePoints(
+            nextEpoch, 
+            _marketId, 
+            false, 
+            _traderAddr, 
+            _creatorAddr, 
+            _points
+        );
     }
 
-    function switchToOutcome(address _marketAddr, uint8 _outcome) public payable nonReentrant isActiveMarket(_marketAddr) {
-        IMarket _market = IMarket(_marketAddr);
-        uint256 _fee = _market.FEE();
-        require(msg.value == _fee, "Must equivalent");
-        _market.switchToOutcome{value: _fee}(msg.sender, _outcome);
-    }
-
-    function withdraw(address _marketAddr) public nonReentrant {
-        _withdraw(msg.sender, _marketAddr);
-    }
-
-    function withdrawFromAllInactiveMarkets() public nonReentrant {
-        address[] memory _marketAddrs = hasBalanceOf[msg.sender];
-        for (uint256 i = 0; i < _marketAddrs.length; i++) {
-            if (!isActive[_marketAddrs[i]]) {
-                _withdraw(msg.sender, _marketAddrs[i]);
+    function _updateEpoch() private {
+        if (nextEpoch > 0) {
+            uint256 _timePassed = block.timestamp - epochTimestamp[nextEpoch];
+            if (_timePassed > EPOCH_DURATION) {
+                nextEpoch++;
+                epochTimestamp[nextEpoch] = block.timestamp;
             }
         }
     }
 
-    function _withdraw(address _trader, address _marketAddr) internal {
-        IMarket _market = IMarket(_marketAddr);
-        (bool _ended, uint64 _balanceOf) = _market.withdraw(_trader);
-        if (_ended && isActive[_marketAddr]) {
-            _deactivateMarket(_marketAddr);
-        }
-        (bool _has, uint256 _index) = _getTraderMarketIndexSafe(_trader, _marketAddr);
-        if (_has) {
-            hasBalanceOf[_trader][_index] = hasBalanceOf[_trader][hasBalanceOf[_trader].length - 1];
-            hasBalanceOf[_trader].pop();
-        }
-        totalBalance -= _balanceOf;
-        balanceOf[_trader] -= _balanceOf;
+    function activateEpoch(address _tokenAddr) external nonReentrant {
+        require(msg.sender == DAO, "Not authorized");
+        require(tokenAddr == address(0), "Token is launched");
+        tokenAddr = _tokenAddr;
+        nextEpoch = 1;
+        epochTimestamp[nextEpoch] = block.timestamp;
     }
 
-    function _getTraderMarketIndexSafe(address _trader, address _market) internal view returns (bool has, uint256 index) {
-        for (uint256 i = 0; i < hasBalanceOf[_trader].length; i++) {
-            if (hasBalanceOf[_trader][i] == _market) {
-                return (true, i);
-            }
-        }
-        return (false, 0);
-    }
+    // Epoch can still be updated after 40 for leaderboard only
+    function claimToken(uint256 _epoch) public nonReentrant {
+        require(tokenAddr != address(0), "Token not launched yet");
+        require(_epoch < nextEpoch && _epoch <= 40, "Epoch out of bound");
+        require(!epochUserClaimed[_epoch][msg.sender], "Already claimed");
+        epochUserClaimed[_epoch][msg.sender] = true;
+        uint256 _decimals = IERC20Metadata(tokenAddr).decimals();
+        uint256 _wei = 10 ** _decimals;
 
-    function _deactivateMarket(address _marketAddr) internal {
-        isActive[_marketAddr] = false;
-        for (uint256 i = 0; i < activeMarkets.length; i++) {
-            if (activeMarkets[i] == _marketAddr) {
-                activeMarkets[i] = activeMarkets[activeMarkets.length - 1];
-                break;
-            }
+        if (_epoch == 0) {
+            uint256 _tradingReward = COMMUNITY_TRADER_INITIAL_LAUNCH * _wei * epochTraderPoints[_epoch][msg.sender] / epochTotalTraderPoints[_epoch];
+            uint256 _creatorReward = COMMUNITY_CREATOR_INITIAL_LAUNCH * _wei * epochCreatorPoints[_epoch][msg.sender] / epochTotalCreatorPoints[_epoch];
+            uint256 _totalReward = _tradingReward + _creatorReward;
+            IToken(tokenAddr).mint(msg.sender, _totalReward);
+            emit ClaimToken(_epoch, msg.sender, _tradingReward, _creatorReward, _totalReward);
         }
-        activeMarkets.pop();
-    }
 
-    /// Only those who are on the side of the losing outcome or a draw can appeal
-    function appeal(address _marketAddr, string memory _reason) public nonReentrant isActiveMarket(_marketAddr) {
-        IMarket _market = IMarket(_marketAddr);
-        _market.appeal(msg.sender, _reason);
-    }
-
-    function protocolVote(address _marketAddr, uint8 _outcome) public nonReentrant isActiveMarket(_marketAddr) {
-        IMarket _market = IMarket(_marketAddr);
-        _market.protocolVote(msg.sender, _outcome, balanceOf[msg.sender]);
-    }
-
-    function delist(address _marketAddr) public nonReentrant {
-        IMarket _market = IMarket(_marketAddr);
-        require(_market.resolved() == false, "Market resolved");
-        require(balanceOf[msg.sender] != 0, "No balance");
-        if (addressHasVotedToDelist[msg.sender][_marketAddr] != 0) {
-            votesToDelist[_marketAddr] -= addressHasVotedToDelist[msg.sender][_marketAddr];
+        if (_epoch > 0) {
+            uint256 _tradingReward = COMMUNITY_TRADER_LINEAR_UNLOCK * _wei * epochTraderPoints[_epoch][msg.sender] / epochTotalTraderPoints[_epoch];
+            uint256 _creatorReward = COMMUNITY_CREATOR_LINEAR_UNLOCK * _wei * epochCreatorPoints[_epoch][msg.sender] / epochTotalCreatorPoints[_epoch];
+            uint256 _totalReward = _tradingReward + _creatorReward;
+            IToken(tokenAddr).mint(msg.sender, _totalReward);
+            emit ClaimToken(_epoch, msg.sender, _tradingReward, _creatorReward, _totalReward);
         }
-        votesToDelist[_marketAddr] += balanceOf[msg.sender];
-        addressHasVotedToDelist[msg.sender][_marketAddr] = balanceOf[msg.sender];
-        uint64 _minimumBalance = _market.minimumBalance();
-        uint64 _totalShares = _market.totalShares();
-        if (votesToDelist[_marketAddr] >= totalBalance / 2) {
-            if (_totalShares < _minimumBalance) {
-                _deactivateMarket(_marketAddr);
-                _market.delist();
-            }
-        }
+    }
+}
+
+contract CloudedToken is ERC20 {
+
+    address constant POINT_PROGRAM = 0x48F7eb29fCB50Bc6225f9f04148e76E323B18C61;
+
+    constructor(string memory _name, string memory _symbol) ERC20(_name, _symbol) {}
+
+    function mint(address _traderAddr, uint256 _amountInWei) external {
+        require(msg.sender == POINT_PROGRAM, "Not authorized");
+        _mint(_traderAddr, _amountInWei);
     }
 }
